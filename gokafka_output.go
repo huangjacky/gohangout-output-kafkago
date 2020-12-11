@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	js "encoding/json"
-	"net/http"
+	"github.com/childe/gohangout/value_render"
+	"github.com/segmentio/kafka-go/compress"
 	"time"
 
 	"github.com/childe/gohangout/codec"
@@ -15,46 +15,19 @@ import (
 	"github.com/segmentio/kafka-go/sasl/scram"
 )
 
-// GoKafkaInput 使用的Kafka-go的input插件
-type GoKafkaInput struct {
-	config         map[interface{}]interface{}
-	decorateEvents bool
-	messages       chan *kafka_go.Message
-	decoder        codec.Decoder
-	reader         *kafka_go.Reader
-	readConfig     *kafka_go.ReaderConfig
-}
-
-/*
-HTTPKafka 增加一个状态获取的接口
-*/
-type HTTPKafka struct {
-	kafka *GoKafkaInput
-}
-
-/**
-返回reader的status接口的数据
-*/
-func (h *HTTPKafka) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(http.StatusOK)
-	if h.kafka.reader != nil {
-		stats := h.kafka.reader.Stats()
-		if data, err := js.Marshal(stats); err == nil {
-			_, _ = writer.Write(data)
-		} else {
-			http.Error(writer, err.Error(), http.StatusInternalServerError)
-		}
-		return
-	}
-	_, _ = writer.Write([]byte(`{}`))
+// GoKafkaOutput 使用的Kafka-go的output插件
+type GoKafkaOutput struct {
+	config   map[interface{}]interface{}
+	encoder  codec.Encoder
+	producer *kafka_go.Writer
+	key      value_render.ValueRender
 }
 
 /**
 格式转换
 */
-func (p *GoKafkaInput) getConsumerConfig(config map[interface{}]interface{}) (*kafka_go.ReaderConfig, error) {
-	c := &kafka_go.ReaderConfig{
+func (p *GoKafkaOutput) getProducerConfig(config map[interface{}]interface{}) (*kafka_go.WriterConfig, error) {
+	c := &kafka_go.WriterConfig{
 		Brokers: make([]string, 1),
 	}
 	if v, ok := config["Brokers"]; ok {
@@ -64,40 +37,59 @@ func (p *GoKafkaInput) getConsumerConfig(config map[interface{}]interface{}) (*k
 	} else {
 		glog.Fatal("Brokers must be set")
 	}
-	if v, ok := config["GroupID"]; ok {
-		c.GroupID = v.(string)
-	} else {
-		glog.Fatal("GroupID must be set")
+	if v, ok := config["BatchSize"]; ok {
+		c.BatchSize = v.(int)
+	}
+	if v, ok := config["BatchBytes"]; ok {
+		c.BatchBytes = v.(int)
+	}
+	if v, ok := config["BatchTimeout"]; ok {
+		c.BatchTimeout = time.Duration(v.(int)) * time.Second
+	}
+	if v, ok := config["ReadTimeout"]; ok {
+		c.ReadTimeout = time.Duration(v.(int)) * time.Second
+	}
+	if v, ok := config["WriteTimeout"]; ok {
+		c.WriteTimeout = time.Duration(v.(int)) * time.Second
+	}
+	if v, ok := config["Acks"]; ok {
+		c.RequiredAcks = v.(int)
+	}
+	if v, ok := config["Balancer"]; ok {
+		vc := v.(map[string]interface{})
+		if vv, ok1 := vc["Type"]; ok1 {
+			switch vv.(string) {
+			case "Hash":
+				c.Balancer = &kafka_go.Hash{}
+			case "CRC32":
+				c.Balancer = &kafka_go.CRC32Balancer{}
+			case "Murmur2":
+				c.Balancer = &kafka_go.Murmur2Balancer{}
+			default:
+				c.Balancer = &kafka_go.RoundRobin{}
+			}
+		} else {
+			glog.Fatal("Missing Balancer Type")
+		}
+	}
+	if v, ok := config["Compression"]; ok {
+		switch v.(string) {
+		case "Gzip":
+			c.CompressionCodec = compress.Compression(1).Codec()
+		case "Snappy":
+			c.CompressionCodec = compress.Compression(2).Codec()
+		case "Lz4":
+			c.CompressionCodec = compress.Compression(3).Codec()
+		case "Zstd":
+			c.CompressionCodec = compress.Compression(4).Codec()
+		default:
+			c.CompressionCodec = nil
+		}
 	}
 	if v, ok := config["Topic"]; ok {
 		c.Topic = v.(string)
 	} else {
 		glog.Fatal("Topic must be set")
-	}
-	if v, ok := config["MinBytes"]; ok {
-		c.MinBytes = v.(int)
-	} else {
-		c.MinBytes = 10e3
-	}
-	if v, ok := config["MaxBytes"]; ok {
-		c.MaxBytes = v.(int)
-	} else {
-		c.MaxBytes = 10e6
-	}
-	if v, ok := config["HeartbeatInterval"]; ok {
-		c.HeartbeatInterval = time.Duration(v.(int)) * time.Second
-	}
-	if v, ok := config["CommitInterval"]; ok {
-		c.CommitInterval = time.Duration(v.(int)) * time.Second
-	}
-	if v, ok := config["MaxWait"]; ok {
-		c.MaxWait = time.Duration(v.(int)) * time.Second
-	}
-	if v, ok := config["SessionTimeout"]; ok {
-		c.SessionTimeout = time.Duration(v.(int)) * time.Second
-	}
-	if v, ok := config["RebalanceTimeout"]; ok {
-		c.RebalanceTimeout = time.Duration(v.(int)) * time.Second
 	}
 	var dialer *kafka_go.Dialer
 	if v, ok := config["Timeout"]; ok {
@@ -166,74 +158,53 @@ func (p *GoKafkaInput) getConsumerConfig(config map[interface{}]interface{}) (*k
 New 插件模式的初始化
 */
 func New(config map[interface{}]interface{}) interface{} {
-	p := &GoKafkaInput{
-		messages:       make(chan *kafka_go.Message, 10),
-		decorateEvents: false,
-		reader:         nil,
+	p := &GoKafkaOutput{
+		config: config,
 	}
-	if v, ok := config["decorateEvents"]; ok {
-		p.decorateEvents = v.(bool)
-	}
-	var codertype = "plain"
-	if v, ok := config["code"]; ok {
-		codertype = v.(string)
-	}
-	p.decoder = codec.NewDecoder(codertype)
-	// 起携程，将所有收到的消息，存放到现在这个队列里面
-	var err error
-
-	if p.readConfig, err = p.getConsumerConfig(config); err == nil {
-		p.reader = kafka_go.NewReader(*p.readConfig)
+	if v, ok := config["codec"]; ok {
+		p.encoder = codec.NewEncoder(v.(string))
 	} else {
-		glog.Fatal("consumer_settings wrong")
+		p.encoder = codec.NewEncoder("json")
 	}
-
-	if listen, ok := config["StatsAddr"]; ok {
-		httpAddr := listen.(string)
-		HTTPKafka := &HTTPKafka{
-			kafka: p,
-		}
-		go func() {
-			glog.Info("Start Http Server: ", httpAddr)
-			_ = http.ListenAndServe(httpAddr, HTTPKafka)
-		}()
-
+	pConf, err := p.getProducerConfig(config)
+	if err != nil {
+		glog.Fatal("Error Config: ", err)
 	}
-	go func() {
-		for {
-			m, err := p.reader.ReadMessage(context.Background())
-			if err != nil {
-				glog.Error("ReadMessage Error: ", err)
-				break
-			}
-			//TODO 这里是不是要做一些异常检查
-			p.messages <- &m
-		}
-	}()
+	p.producer = kafka_go.NewWriter(*pConf)
 	return p
 }
 
-//ReadOneEvent 单次事件的处理函数
-func (p *GoKafkaInput) ReadOneEvent() map[string]interface{} {
-	message, ok := <-p.messages
-	if ok {
-		event := p.decoder.Decode(message.Value)
-		if p.decorateEvents {
-			kafkaMeta := make(map[string]interface{})
-			kafkaMeta["topic"] = message.Topic
-			kafkaMeta["length"] = len(message.Value)
-			kafkaMeta["partition"] = message.Partition
-			kafkaMeta["offset"] = message.Offset
-			event["@metadata"] = map[string]interface{}{"kafka": kafkaMeta}
-		}
-		return event
+//Emit 单次事件的处理函数
+func (p *GoKafkaOutput) Emit(event map[string]interface{}) {
+	buf, err := p.encoder.Encode(event)
+	if err != nil {
+		glog.Errorf("marshal %v error: %s", event, err)
+		return
 	}
-	return nil
+	if p.key == nil {
+		err = p.producer.WriteMessages(
+			context.Background(),
+			kafka_go.Message{
+				Key:   nil,
+				Value: buf,
+			})
+	} else {
+		key := []byte(p.key.Render(event).(string))
+		err = p.producer.WriteMessages(
+			context.Background(),
+			kafka_go.Message{
+				Key:   key,
+				Value: buf,
+			})
+	}
+	if err != nil {
+		glog.Error("Write Message: ", err)
+	}
 }
 
 //Shutdown 关闭需要做的事情
-func (p *GoKafkaInput) Shutdown() {
-	if err := p.reader.Close(); err != nil {
-		glog.Fatal("failed to close reader:", err)
+func (p *GoKafkaOutput) Shutdown() {
+	if err := p.producer.Close(); err != nil {
+		glog.Fatal("failed to close writer:", err)
 	}
 }
