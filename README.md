@@ -5,7 +5,6 @@
 使用[kafka-go](https://github.com/segmentio/kafka-go) 这个仓库来作为output
 ### TODO
 - TLS配置项的支持
-- 写入状态的统计数据
 
 ### DONE
 SASL已经支持
@@ -27,6 +26,7 @@ go build -buildmode=plugin -o gokafka_output.so gokafka_output.go
 inputs:
     - Stdin:
         codec: plain
+
 outputs:
     - Stdout:
         if:
@@ -35,5 +35,6 @@ outputs:
         Brokers:
             - '127.0.0.1:9092'
         Topic: 'test'
+        StatsAddr: '127.0.0.1:12345'
         Compression: 'Gzip'
 ```

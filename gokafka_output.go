@@ -3,13 +3,15 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"github.com/childe/gohangout/value_render"
-	"github.com/segmentio/kafka-go/compress"
+	js "encoding/json"
+	"net/http"
 	"time"
 
 	"github.com/childe/gohangout/codec"
+	"github.com/childe/gohangout/value_render"
 	"github.com/golang/glog"
 	kafka_go "github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/compress"
 	"github.com/segmentio/kafka-go/sasl"
 	"github.com/segmentio/kafka-go/sasl/plain"
 	"github.com/segmentio/kafka-go/sasl/scram"
@@ -21,6 +23,31 @@ type GoKafkaOutput struct {
 	encoder  codec.Encoder
 	producer *kafka_go.Writer
 	key      value_render.ValueRender
+}
+
+/*
+HTTPKafka 增加一个状态获取的接口
+*/
+type HTTPKafka struct {
+	kafka *GoKafkaOutput
+}
+
+/**
+返回reader的status接口的数据
+*/
+func (h *HTTPKafka) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	if h.kafka.producer != nil {
+		stats := h.kafka.producer.Stats()
+		if data, err := js.Marshal(stats); err == nil {
+			_, _ = writer.Write(data)
+		} else {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	_, _ = writer.Write([]byte(`{}`))
 }
 
 /**
@@ -169,6 +196,17 @@ func New(config map[interface{}]interface{}) interface{} {
 	pConf, err := p.getProducerConfig(config)
 	if err != nil {
 		glog.Fatal("Error Config: ", err)
+	}
+	if listen, ok := config["StatsAddr"]; ok {
+		httpAddr := listen.(string)
+		HTTPKafka := &HTTPKafka{
+			kafka: p,
+		}
+		go func() {
+			glog.Info("Start Http Server: ", httpAddr)
+			_ = http.ListenAndServe(httpAddr, HTTPKafka)
+		}()
+
 	}
 	p.producer = kafka_go.NewWriter(*pConf)
 	return p

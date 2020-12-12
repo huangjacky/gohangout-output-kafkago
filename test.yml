@@ -10,4 +10,5 @@ outputs:
         Brokers:
             - '127.0.0.1:9092'
         Topic: 'test'
+        StatsAddr: '127.0.0.1:12345'
         Compression: 'Gzip'
