@@ -1,0 +1,13 @@
+inputs:
+    - Stdin:
+        codec: plain
+
+outputs:
+    - Stdout:
+        if:
+            - '{{if .error}}y{{end}}'
+    - '/Users/fiendhuang/program/my/gohangout/gokafka_output.so':
+        Brokers:
+            - '127.0.0.1:9092'
+        Topic: 'test'
+        Compression: 'Gzip'

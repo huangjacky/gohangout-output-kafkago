@@ -24,16 +24,16 @@ go build -buildmode=plugin -o gokafka_output.so gokafka_output.go
 所有参数字段名字都使用kafka-go原生的，所以和gohangout的kafka插件的配置名字有些不一样。主要是为了偷懒.
 
 ```yaml
+inputs:
+    - Stdin:
+        codec: plain
 outputs:
-  - '/usr/local/services/waf-attack-cls-go-1.0/bin/gokafka_output.so':
-      Brokers:
-        - '10.1.1.1:9092'
-      Topic: 'con_attack_log'
-      SASL:
-        Type: 'Plain'
-        Username: 'huangjacky'
-        Password: 'test'
-      Balancer:
-        Type: 'CRC32'
-      Compression: 'Gzip'
+    - Stdout:
+        if:
+            - '{{if .error}}y{{end}}'
+    - '/Users/fiendhuang/program/my/gohangout/gokafka_output.so':
+        Brokers:
+            - '127.0.0.1:9092'
+        Topic: 'test'
+        Compression: 'Gzip'
 ```
